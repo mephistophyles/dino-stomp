@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dino Stomp</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#9fd3f2;font-family:"Trebuchet MS",Verdana,sans-serif;color:#fff;}
+  canvas{display:block;}
+  #hud{position:fixed;inset:0;pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,.7);}
+  #topleft{position:absolute;left:16px;top:14px;}
+  #health{display:flex;gap:5px;margin-bottom:6px;}
+  .bar{width:38px;height:18px;border:2px solid #fff;border-radius:3px;background:#3a3a3a;box-shadow:0 1px 3px rgba(0,0,0,.5);}
+  .bar.on{background:#e33d3d;}
+  #score{font-size:26px;font-weight:bold;}
+  #stats{position:absolute;right:16px;top:14px;font-size:13px;line-height:1.45;background:rgba(0,0,0,.28);padding:8px 12px;border-radius:8px;text-shadow:none;min-width:190px;}
+  #stats b{color:#ffd76a;}
+  #msg{position:absolute;left:50%;top:60px;transform:translateX(-50%);font-size:22px;font-weight:bold;opacity:0;transition:opacity .25s;white-space:nowrap;}
+  #warn{position:absolute;left:50%;top:100px;transform:translateX(-50%);font-size:20px;font-weight:bold;color:#ffcf3a;opacity:0;white-space:nowrap;}
+  #help{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);font-size:13px;opacity:.85;white-space:nowrap;}
+  #flash{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,rgba(255,0,0,0) 40%,rgba(200,0,0,.75) 100%);opacity:0;transition:opacity .1s;}
+  #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,20,10,.72);}
+  #overlay .card{background:#1e2a18;border:3px solid #7fb04a;border-radius:14px;padding:28px 36px;max-width:520px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.6);}
+  #overlay h1{margin:0 0 8px;font-size:44px;letter-spacing:2px;color:#b9e37a;}
+  #overlay p{margin:8px 0;line-height:1.5;}
+  #overlay button{margin-top:14px;font-size:20px;padding:10px 28px;border-radius:8px;border:0;background:#7fb04a;color:#102;cursor:pointer;font-weight:bold;}
+  #overlay button:hover{background:#9ad05f;}
+  #overlay table{margin:10px auto;border-collapse:collapse;font-size:14px;text-align:left;}
+  #overlay td{padding:2px 10px;}
+  #overlay td:last-child{text-align:right;color:#ffd76a;font-weight:bold;}
+  kbd{background:#3b4a30;border:1px solid #7fb04a;border-radius:4px;padding:1px 6px;font-family:monospace;}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="topleft"><div id="health"></div><div id="score">Score 0</div></div>
+  <div id="stats"></div>
+  <div id="msg"></div>
+  <div id="warn"></div>
+  <div id="help"><kbd>W</kbd>/<kbd>S</kbd> walk &nbsp; <kbd>A</kbd>/<kbd>D</kbd> turn &nbsp; <kbd>SPACE</kbd> lunge &amp; chomp &nbsp; <kbd>Q</kbd> quit</div>
+</div>
+<div id="flash"></div>
+<div id="overlay">
+  <div class="card" id="card">
+    <h1>DINO STOMP</h1>
+    <p>You are a T-rex. Stomp through grassland, desert and forest. Knock over trees, crush little dinos, hunt for food.</p>
+    <p><kbd>W</kbd>/<kbd>S</kbd> walk &nbsp; <kbd>A</kbd>/<kbd>D</kbd> turn &nbsp; <kbd>SPACE</kbd> lunge &amp; chomp &nbsp; <kbd>Q</kbd> quit</p>
+    <p style="font-size:13px;opacity:.85">Small dinos: crush = 1 pt, eat = 5 pts + 1 health.<br>Stegosaurus: 3 bites to kill, then eat for 3 health. Dodge its tail!<br>Raptors hunt in packs and flank you. Stomp or bite them.</p>
+    <button id="startBtn">Start Stomping</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+// ============================================================ utilities
+const V3=(x=0,y=0,z=0)=>new THREE.Vector3(x,y,z);
+const rand=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function angleWrap(a){while(a>Math.PI)a-=2*Math.PI;while(a<-Math.PI)a+=2*Math.PI;return a;}
+function fwdOf(h){return V3(Math.sin(h),0,Math.cos(h));}
+function headingTo(from,to){return Math.atan2(to.x-from.x,to.z-from.z);}
+function turnToward(cur,target,rate){return cur+clamp(angleWrap(target-cur),-rate,rate);}
+function dist2(a,b){const dx=a.x-b.x,dz=a.z-b.z;return Math.sqrt(dx*dx+dz*dz);}
+
+// ============================================================ noise / biomes
+function hash2(x,y){const n=Math.sin(x*127.1+y*311.7)*43758.5453;return n-Math.floor(n);}
+function smooth(t){return t*t*(3-2*t);}
+function noise2(x,y){const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi;
+  const a=hash2(xi,yi),b=hash2(xi+1,yi),c=hash2(xi,yi+1),d=hash2(xi+1,yi+1);const u=smooth(xf),v=smooth(yf);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;}
+function fbm(x,y){let v=0,a=0.5,f=1;for(let i=0;i<4;i++){v+=a*noise2(x*f,y*f);f*=2;a*=0.5;}return v/0.9375;}
+function biomeNoise(x,z){return fbm(x*0.011+37.3,z*0.011+91.7);}
+function biomeAt(x,z){const n=biomeNoise(x,z);return n<0.43?'desert':(n>0.61?'forest':'grass');}
+const C_SAND=[0.87,0.74,0.45],C_GRASS=[0.40,0.64,0.27],C_FOREST=[0.22,0.44,0.17];
+function lerp3(a,b,t){return[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];}
+function groundColor(n){
+  if(n<0.40)return C_SAND; if(n<0.46)return lerp3(C_SAND,C_GRASS,(n-0.40)/0.06);
+  if(n<0.58)return C_GRASS; if(n<0.64)return lerp3(C_GRASS,C_FOREST,(n-0.58)/0.06); return C_FOREST;}
+
+// ============================================================ renderer / scene
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x9fd3f2);scene.fog=new THREE.Fog(0x9fd3f2,70,175);
+const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.5,500);
+scene.add(new THREE.HemisphereLight(0xd8ecff,0x5a6b3a,0.75));
+const sun=new THREE.DirectionalLight(0xfff1d0,1.1);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
+{const sc=sun.shadow.camera;sc.left=-70;sc.right=70;sc.top=70;sc.bottom=-70;sc.near=1;sc.far=250;sun.shadow.bias=-0.002;}
+scene.add(sun);scene.add(sun.target);
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+// ============================================================ audio (tiny synth)
+let actx=null;
+function audioInit(){if(actx)return;try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}}
+function sfx(kind){
+  if(!actx)return;const t=actx.currentTime;
+  const g=actx.createGain();g.connect(actx.destination);
+  if(kind==='thud'){const o=actx.createOscillator();o.type='sine';o.frequency.setValueAtTime(70,t);o.frequency.exponentialRampToValueAtTime(30,t+0.18);
+    g.gain.setValueAtTime(0.5,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.2);o.connect(g);o.start(t);o.stop(t+0.22);}
+  else if(kind==='chomp'||kind==='crunch'){const len=0.12;const buf=actx.createBuffer(1,actx.sampleRate*len,actx.sampleRate);const d=buf.getChannelData(0);
+    for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*(1-i/d.length);const s=actx.createBufferSource();s.buffer=buf;
+    const f=actx.createBiquadFilter();f.type='lowpass';f.frequency.value=kind==='chomp'?900:400;s.connect(f);f.connect(g);g.gain.value=0.5;s.start(t);}
+  else if(kind==='hurt'){const o=actx.createOscillator();o.type='sawtooth';o.frequency.setValueAtTime(220,t);o.frequency.exponentialRampToValueAtTime(90,t+0.3);
+    g.gain.setValueAtTime(0.25,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.35);o.connect(g);o.start(t);o.stop(t+0.36);}
+  else if(kind==='eat'){const o=actx.createOscillator();o.type='triangle';o.frequency.setValueAtTime(330,t);o.frequency.setValueAtTime(440,t+0.08);o.frequency.setValueAtTime(660,t+0.16);
+    g.gain.setValueAtTime(0.2,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.3);o.connect(g);o.start(t);o.stop(t+0.32);}
+  else if(kind==='tree'){const o=actx.createOscillator();o.type='square';o.frequency.setValueAtTime(120,t);o.frequency.exponentialRampToValueAtTime(40,t+0.4);
+    g.gain.setValueAtTime(0.15,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.45);o.connect(g);o.start(t);o.stop(t+0.46);}
+}
+
+// ============================================================ shared geometry / materials
+const MAT={
+  trunk:new THREE.MeshLambertMaterial({color:0x6b4a2b}),
+  canopyA:new THREE.MeshLambertMaterial({color:0x2f7a2a}),
+  canopyB:new THREE.MeshLambertMaterial({color:0x4a9a35}),
+  tuft:new THREE.MeshLambertMaterial({color:0x5fa63a}),
+  rock:new THREE.MeshLambertMaterial({color:0x9b8f7a}),
+  cactus:new THREE.MeshLambertMaterial({color:0x4f8a45}),
+  ground:new THREE.MeshLambertMaterial({vertexColors:true}),
+};
+const GEO={
+  trunk:new THREE.CylinderGeometry(0.25,0.45,3.6,7),
+  cone:new THREE.ConeGeometry(2.3,4.6,8),
+  ball:new THREE.SphereGeometry(2.2,8,6),
+  tuft:new THREE.ConeGeometry(0.18,0.7,4),
+  rock:new THREE.DodecahedronGeometry(0.55,0),
+  cactus:new THREE.BoxGeometry(0.5,2.4,0.5),
+  cactusArm:new THREE.BoxGeometry(0.35,1.0,0.35),
+};
+function box(w,h,d,mat,x,y,z,parent){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat);m.position.set(x,y,z);m.castShadow=true;if(parent)parent.add(m);return m;}
+function lam(c){return new THREE.MeshLambertMaterial({color:c});}
+
+// ============================================================ world chunks
+const CHUNK=48,VIEW=2;
+const chunks=new Map();
+const fallingTrees=[];
+function chunkKey(cx,cz){return cx+','+cz;}
+function makeTree(x,z,rng,parent){
+  const g=new THREE.Group();const s=0.8+rng()*0.5;
+  const trunk=new THREE.Mesh(GEO.trunk,MAT.trunk);trunk.position.y=1.8;trunk.castShadow=true;g.add(trunk);
+  const round=rng()<0.4;const can=new THREE.Mesh(round?GEO.ball:GEO.cone,rng()<0.5?MAT.canopyA:MAT.canopyB);
+  can.position.y=round?5.0:5.7;can.castShadow=true;g.add(can);
+  g.position.set(x,0,z);g.scale.setScalar(s);g.rotation.y=rng()*6.28;parent.add(g);
+  return{g,x,z,state:'up',t:0,axis:null};
+}
+function makeCactus(x,z,rng,parent){
+  const g=new THREE.Group();const m=new THREE.Mesh(GEO.cactus,MAT.cactus);m.position.y=1.2;m.castShadow=true;g.add(m);
+  if(rng()<0.7){const a=new THREE.Mesh(GEO.cactusArm,MAT.cactus);a.position.set(0.5,1.5,0);a.castShadow=true;g.add(a);}
+  if(rng()<0.5){const a=new THREE.Mesh(GEO.cactusArm,MAT.cactus);a.position.set(-0.5,1.1,0);a.castShadow=true;g.add(a);}
+  g.position.set(x,0,z);g.rotation.y=rng()*6.28;parent.add(g);
+}
+function makeChunk(cx,cz){
+  const rng=mulberry32(((cx*73856093)^(cz*19349663)^0x5bd1e995)>>>0||7);
+  const g=new THREE.Group();const ox=cx*CHUNK,oz=cz*CHUNK;
+  const geo=new THREE.PlaneGeometry(CHUNK,CHUNK,12,12);geo.rotateX(-Math.PI/2);
+  const pos=geo.attributes.position;const cols=new Float32Array(pos.count*3);
+  for(let i=0;i<pos.count;i++){const wx=ox+CHUNK/2+pos.getX(i),wz=oz+CHUNK/2+pos.getZ(i);
+    const c=groundColor(biomeNoise(wx,wz));const j=(noise2(wx*0.35,wz*0.35)-0.5)*0.09;
+    cols[i*3]=c[0]+j;cols[i*3+1]=c[1]+j;cols[i*3+2]=c[2]+j*0.5;}
+  geo.setAttribute('color',new THREE.BufferAttribute(cols,3));
+  const ground=new THREE.Mesh(geo,MAT.ground);ground.position.set(ox+CHUNK/2,0,oz+CHUNK/2);ground.receiveShadow=true;g.add(ground);
+  const trees=[],tufts=[],rocks=[];
+  for(let i=0;i<230;i++){const x=ox+rng()*CHUNK,z=oz+rng()*CHUNK,b=biomeAt(x,z),r=rng();
+    if(b==='forest'){if(r<0.12)trees.push(makeTree(x,z,rng,g));else if(r<0.45)tufts.push([x,z,rng()]);}
+    else if(b==='grass'){if(r<0.012)trees.push(makeTree(x,z,rng,g));else if(r<0.72)tufts.push([x,z,rng()]);}
+    else{if(r<0.02)makeCactus(x,z,rng,g);else if(r<0.08)rocks.push([x,z,rng()]);}
+  }
+  const dummy=new THREE.Object3D();
+  if(tufts.length){const im=new THREE.InstancedMesh(GEO.tuft,MAT.tuft,tufts.length);im.frustumCulled=false;
+    tufts.forEach((t,i)=>{dummy.position.set(t[0],0.3,t[1]);dummy.rotation.set(0,t[2]*6.28,(t[2]-0.5)*0.3);dummy.scale.setScalar(0.8+t[2]*0.7);dummy.updateMatrix();im.setMatrixAt(i,dummy.matrix);});g.add(im);}
+  if(rocks.length){const im=new THREE.InstancedMesh(GEO.rock,MAT.rock,rocks.length);im.frustumCulled=false;im.castShadow=true;
+    rocks.forEach((t,i)=>{dummy.position.set(t[0],0.2,t[1]);dummy.rotation.set(t[2],t[2]*6.28,0);dummy.scale.setScalar(0.5+t[2]*1.2);dummy.updateMatrix();im.setMatrixAt(i,dummy.matrix);});g.add(im);}
+  scene.add(g);
+  return{g,trees,groundGeo:geo,cx,cz};
+}
+let lastPC=null;
+function updateChunks(force){
+  const pcx=Math.floor(trex.pos.x/CHUNK),pcz=Math.floor(trex.pos.z/CHUNK);
+  if(!force&&lastPC&&lastPC[0]===pcx&&lastPC[1]===pcz)return;lastPC=[pcx,pcz];
+  for(let dx=-VIEW;dx<=VIEW;dx++)for(let dz=-VIEW;dz<=VIEW;dz++){const k=chunkKey(pcx+dx,pcz+dz);if(!chunks.has(k))chunks.set(k,makeChunk(pcx+dx,pcz+dz));}
+  for(const[k,c]of chunks){if(Math.abs(c.cx-pcx)>VIEW+1||Math.abs(c.cz-pcz)>VIEW+1){scene.remove(c.g);c.groundGeo.dispose();chunks.delete(k);}}
+}
+
+// ============================================================ footprints
+const footprints=[];
+const footGeo=new THREE.CircleGeometry(1,10);footGeo.rotateX(-Math.PI/2);
+function placeFootprint(x,z,heading,sand){
+  const mat=new THREE.MeshBasicMaterial({color:sand?0x8a6a30:0x22391a,transparent:true,opacity:sand?0.6:0.5,depthWrite:false});
+  const g=new THREE.Group();
+  const pad=new THREE.Mesh(footGeo,mat);pad.scale.set(0.6,1,0.8);g.add(pad);
+  for(let i=-1;i<=1;i++){const toe=new THREE.Mesh(footGeo,mat);toe.scale.set(0.22,1,0.5);toe.position.set(i*0.5,0,1.0);toe.rotation.y=-i*0.4;g.add(toe);}
+  g.position.set(x,0.03,z);g.rotation.y=heading;g.renderOrder=1;g.userData={mat,t:0,base:mat.opacity};
+  scene.add(g);footprints.push(g);
+  if(footprints.length>180){const o=footprints.shift();scene.remove(o);o.userData.mat.dispose();}
+}
+function updateFootprints(dt){
+  for(let i=footprints.length-1;i>=0;i--){const f=footprints[i];f.userData.t+=dt;const k=1-f.userData.t/45;
+    if(k<=0){scene.remove(f);f.userData.mat.dispose();footprints.splice(i,1);}else f.userData.mat.opacity=f.userData.base*k;}
+}
+
+// ============================================================ T-rex
+function buildTrex(){
+  const skin=lam(0x5f7d3b),belly=lam(0xa9b26e),dark=lam(0x2a2a20),tooth=lam(0xf3f1e0);
+  const root=new THREE.Group();
+  const body=box(1.8,1.9,3.6,skin,0,3.1,0.2,root);
+  box(1.3,0.9,3.0,belly,0,2.3,0.4,root);
+  const neck=box(1.0,1.1,1.5,skin,0,3.9,2.2,root);neck.rotation.x=-0.35;
+  const head=new THREE.Group();head.position.set(0,4.35,3.2);root.add(head);
+  box(1.25,1.0,2.1,skin,0,0.2,0.8,head);
+  box(0.9,0.5,0.8,skin,0,0.9,0.3,head);
+  for(const s of[-1,1]){box(0.22,0.22,0.22,dark,s*0.6,0.45,0.35,head);}
+  for(let i=0;i<4;i++){box(0.12,0.3,0.12,tooth,-0.45,-0.35,0.3+i*0.38,head);box(0.12,0.3,0.12,tooth,0.45,-0.35,0.3+i*0.38,head);}
+  const jaw=new THREE.Group();jaw.position.set(0,-0.3,0.05);head.add(jaw);
+  box(1.1,0.45,1.95,skin,0,-0.15,0.85,jaw);
+  box(0.9,0.2,1.6,lam(0x8b2d3b),0,0.1,0.9,jaw);
+  const legs=[];
+  for(const s of[-1,1]){const hip=new THREE.Group();hip.position.set(s*0.8,2.7,-0.3);root.add(hip);
+    box(0.75,1.7,1.1,skin,0,-0.7,0.1,hip);
+    const shin=new THREE.Group();shin.position.set(0,-1.5,0);hip.add(shin);
+    box(0.45,1.3,0.5,skin,0,-0.6,0.25,shin);
+    const foot=box(0.7,0.3,1.3,skin,0,-1.3,0.5,shin);foot.castShadow=true;
+    legs.push({hip,shin});}
+  for(const s of[-1,1]){const a=box(0.3,0.3,0.9,skin,s*0.95,3.2,1.7,root);a.rotation.x=-0.5;}
+  const tail1=new THREE.Group();tail1.position.set(0,3.2,-1.6);root.add(tail1);box(1.3,1.3,2.2,skin,0,0,-1.0,tail1);
+  const tail2=new THREE.Group();tail2.position.set(0,0,-2.1);tail1.add(tail2);box(0.85,0.85,2.2,skin,0,-0.05,-1.0,tail2);
+  const tail3=new THREE.Group();tail3.position.set(0,0,-2.1);tail2.add(tail3);box(0.45,0.45,2.2,skin,0,-0.1,-1.0,tail3);
+  root.traverse(o=>{if(o.isMesh)o.castShadow=true;});
+  scene.add(root);
+  return{root,head,jaw,legs,tails:[tail1,tail2,tail3],body};
+}
+const trex={pos:V3(0,0,0),heading:0,speed:0,health:5,maxHealth:5,lungeT:0,lungeCd:0,chomped:true,walkPhase:0,stride:0,side:1,invuln:0,jawOpen:0,model:null};
+
+// ============================================================ entities
+const entities=[];
+const packs=[];
+function disposeGroup(g){g.traverse(o=>{if(o.isMesh){o.geometry.dispose();if(o.material&&!Object.values(MAT).includes(o.material))o.material.dispose();}});}
+function buildSmall(){
+  const c=new THREE.Color().setHSL(rand(0.13,0.3),0.6,0.45);const m=lam(c.getHex()),dark=lam(0x222);
+  const g=new THREE.Group();
+  box(0.5,0.45,1.0,m,0,0.65,0,g);box(0.35,0.35,0.55,m,0,0.98,0.65,g);box(0.2,0.2,1.0,m,0,0.62,-0.9,g);
+  box(0.08,0.08,0.08,dark,0.16,1.05,0.8,g);box(0.08,0.08,0.08,dark,-0.16,1.05,0.8,g);
+  const legs=[];for(const s of[-1,1]){const l=new THREE.Group();l.position.set(s*0.2,0.5,-0.1);g.add(l);box(0.15,0.5,0.2,m,0,-0.25,0,l);legs.push(l);}
+  scene.add(g);return{g,legs};
+}
+function buildRaptor(){
+  const m=lam(0xb5622a),m2=lam(0xe0a060),dark=lam(0x222);
+  const g=new THREE.Group();
+  box(0.7,0.7,1.8,m,0,1.2,0,g);box(0.55,0.35,1.5,m2,0,0.9,0.1,g);
+  const neck=box(0.4,0.5,0.9,m,0,1.55,1.0,g);neck.rotation.x=-0.6;
+  box(0.42,0.42,1.0,m,0,1.85,1.45,g);box(0.34,0.2,0.6,m2,0,1.62,1.6,g);
+  box(0.08,0.08,0.08,dark,0.2,1.95,1.6,g);box(0.08,0.08,0.08,dark,-0.2,1.95,1.6,g);
+  const t=box(0.3,0.3,2.2,m,0,1.25,-1.9,g);t.rotation.x=0.1;
+  const legs=[];for(const s of[-1,1]){const l=new THREE.Group();l.position.set(s*0.32,1.0,-0.2);g.add(l);box(0.3,0.8,0.5,m,0,-0.35,0.05,l);
+    const sh=new THREE.Group();sh.position.set(0,-0.75,0);l.add(sh);box(0.2,0.6,0.22,m,0,-0.3,0.1,sh);box(0.3,0.15,0.6,m2,0,-0.6,0.25,sh);box(0.08,0.35,0.1,lam(0xeeeeee),s*0.1,-0.5,0.5,sh);legs.push({hip:l,shin:sh});}
+  for(const s of[-1,1]){const a=box(0.15,0.15,0.6,m,s*0.4,1.2,0.9,g);a.rotation.x=-0.6;}
+  scene.add(g);return{g,legs};
+}
+function buildStego(){
+  const m=lam(0x6b8e5a),belly=lam(0xa0b07a),plate=lam(0xc9603a),spike=lam(0xe8dcc0),dark=lam(0x222);
+  const g=new THREE.Group();
+  box(2.2,1.9,4.4,m,0,1.75,0,g);box(1.8,1.0,3.8,belly,0,1.0,0,g);
+  box(0.8,0.7,1.0,m,0,1.3,2.5,g);box(0.7,0.55,1.1,m,0,0.95,3.2,g);
+  box(0.1,0.1,0.1,dark,0.3,1.1,3.4,g);box(0.1,0.1,0.1,dark,-0.3,1.1,3.4,g);
+  for(const sx of[-1,1])for(const sz of[-1,1]){box(0.65,1.0,0.65,m,sx*0.8,0.5,sz*1.45,g);}
+  const plates=[];
+  for(let i=0;i<8;i++){const p=box(0.16,1.1+(i>1&&i<6?0.4:0),0.8,plate,(i%2?0.28:-0.28),2.95+(i>1&&i<6?0.2:0),1.7-i*0.5,g);p.rotation.z=(i%2?-1:1)*0.15;plates.push(p);}
+  const tail=new THREE.Group();tail.position.set(0,1.9,-2.2);g.add(tail);
+  box(0.8,0.8,2.6,m,0,-0.15,-1.3,tail);
+  for(let i=0;i<4;i++){const sp=new THREE.Mesh(new THREE.ConeGeometry(0.14,1.0,6),spike);sp.position.set((i%2?0.45:-0.45),0.35,-1.8-(i>1?0.6:0));sp.rotation.z=(i%2?-0.9:0.9);sp.castShadow=true;tail.add(sp);}
+  g.traverse(o=>{if(o.isMesh)o.castShadow=true;});
+  scene.add(g);return{g,tail,plates,mats:[m,belly,plate]};
+}
+function spawnPoint(minR,maxR){const a=rand(0,6.283),r=rand(minR,maxR);return V3(trex.pos.x+Math.sin(a)*r,0,trex.pos.z+Math.cos(a)*r);}
+function spawnSmall(p){const b=buildSmall();b.g.position.copy(p);const e={type:'small',...b,heading:rand(-3.14,3.14),tHead:0,speed:0,wanderT:0,phase:0,alive:true,hp:1};e.tHead=e.heading;entities.push(e);return e;}
+function spawnStego(p){const b=buildStego();b.g.position.copy(p);const e={type:'stego',...b,heading:rand(-3.14,3.14),tHead:0,speed:0,wanderT:0,phase:0,alive:true,hp:3,state:'idle',st:0,loiter:0};e.tHead=e.heading;entities.push(e);return e;}
+function spawnPack(p){const n=3+Math.floor(Math.random()*3);const pack={members:[],anchor:p.clone(),hunting:false,wanderT:0,tHead:rand(-3.14,3.14)};
+  for(let i=0;i<n;i++){const b=buildRaptor();const q=p.clone().add(V3(rand(-4,4),0,rand(-4,4)));b.g.position.copy(q);
+    const e={type:'raptor',...b,pack,idx:i,heading:rand(-3.14,3.14),tHead:0,speed:0,wanderT:rand(0,2),phase:rand(0,6),alive:true,hp:1,state:'flank',cd:1.5+i*1.1,lungeT:0};
+    e.tHead=e.heading;pack.members.push(e);entities.push(e);}
+  packs.push(pack);return pack;}
+
+// ============================================================ HUD / messages
+const $=id=>document.getElementById(id);
+const stats={score:0,trees:0,smallCrushed:0,eaten:0,kills:{small:0,raptor:0,stego:0},dmgTaken:0,dmgDone:0};
+let msgT=0,warnT=0;
+function showMsg(text,color){const m=$('msg');m.textContent=text;m.style.color=color||'#fff';m.style.opacity=1;msgT=1.8;}
+function showWarn(text){const w=$('warn');w.textContent=text;w.style.opacity=1;warnT=1.2;}
+function flash(){const f=$('flash');f.style.opacity=1;setTimeout(()=>f.style.opacity=0,180);}
+function renderHealth(){let h='';for(let i=0;i<trex.maxHealth;i++)h+=`<div class="bar${i<trex.health?' on':''}"></div>`;$('health').innerHTML=h;}
+function renderStats(){
+  $('score').textContent='Score '+stats.score;
+  $('stats').innerHTML=`Trees crushed <b>${stats.trees}</b><br>Small animals crushed <b>${stats.smallCrushed}</b><br>Things eaten <b>${stats.eaten}</b><br>
+  Kills: small <b>${stats.kills.small}</b> · raptor <b>${stats.kills.raptor}</b> · stego <b>${stats.kills.stego}</b><br>Damage dealt <b>${stats.dmgDone}</b> · taken <b>${stats.dmgTaken}</b>`;
+}
+
+// ============================================================ combat helpers
+function addScore(n){stats.score+=n;}
+function hurtTrex(n,src){
+  if(trex.invuln>0||gameOver)return;
+  trex.health=Math.max(0,trex.health-n);stats.dmgTaken+=n;trex.invuln=0.6;flash();sfx('hurt');renderHealth();
+  showMsg(src+' hit you! -'+n+' health','#ff6b6b');
+  if(trex.health<=0)endGame('You were killed by a '+src.toLowerCase()+'.');
+}
+function heal(n){trex.health=Math.min(trex.maxHealth,trex.health+n);renderHealth();}
+function killEntity(e,squash){
+  e.alive=false;e.removeT=squash?5:0;
+  if(squash){e.g.scale.y=0.18;e.g.position.y=0;}
+}
+function crush(e){
+  if(e.type==='small'){stats.smallCrushed++;stats.kills.small++;addScore(1);showMsg('Crushed a little dino! +1','#ffe37a');}
+  else if(e.type==='raptor'){stats.kills.raptor++;stats.dmgDone++;addScore(1);showMsg('Stomped a raptor! +1','#ffe37a');}
+  killEntity(e,true);sfx('crunch');
+}
+function doChomp(){
+  const f=fwdOf(trex.heading);const mouth=trex.pos.clone().addScaledVector(f,3.6);
+  let best=null,bd=1e9;
+  for(const e of entities){if(e.removeT!==undefined&&e.type!=='stego')continue;if(e.type==='stego'&&e.state==='eaten')continue;
+    const r=e.type==='stego'?4.6:3.2;const d=dist2(e.g.position,mouth);if(d<r&&d<bd){bd=d;best=e;}}
+  if(!best)return false;
+  if(best.type==='small'){stats.eaten++;stats.kills.small++;addScore(5);heal(1);sfx('eat');showMsg('Ate a little dino! +5, +1 health','#8cff8c');killEntity(best,false);}
+  else if(best.type==='raptor'){if(best.alive){stats.kills.raptor++;stats.dmgDone++;addScore(2);showMsg('Chomped a raptor! +2','#8cff8c');}else{addScore(0);showMsg('Ate a squashed raptor. Not nutritious.','#ccc');}
+    stats.eaten++;killEntity(best,false);}
+  else if(best.type==='stego'){
+    if(best.alive){best.hp--;stats.dmgDone++;sfx('crunch');
+      if(best.hp<=0){best.alive=false;best.state='dead';stats.kills.stego++;addScore(10);showMsg('Stegosaurus down! +10. Eat it for 3 health.','#8cff8c');
+        best.g.rotation.z=Math.PI/2;best.g.position.y=1.1;best.mats.forEach(m=>m.color.multiplyScalar(0.7));}
+      else{showMsg('Bit the stegosaurus! ('+best.hp+'/3 left) Watch its tail!','#ffb46b');if(best.state==='idle'||best.state==='cool'){best.state='windup';best.st=0;}}
+    }else{stats.eaten++;heal(3);sfx('eat');showMsg('Devoured the stegosaurus! +3 health','#8cff8c');best.state='eaten';best.removeT=0;}
+  }
+  return true;
+}
+
+// ============================================================ input
+const keys={};
+addEventListener('keydown',e=>{
+  if(e.code==='Space')e.preventDefault();
+  if(!started){if(e.code==='Space'||e.code==='Enter')startGame();return;}
+  keys[e.code]=true;
+  if(e.code==='Space'&&!gameOver&&trex.lungeT<=0&&trex.lungeCd<=0){trex.lungeT=0.38;trex.lungeCd=0.75;trex.chomped=false;sfx('chomp');}
+  if((e.code==='KeyQ'||e.code==='Escape')&&!gameOver)endGame('You quit. The T-rex retires to a quiet swamp.');
+});
+addEventListener('keyup',e=>{keys[e.code]=false;});
+
+// ============================================================ update: trex
+function updateTrex(dt){
+  const lunging=trex.lungeT>0;
+  let target=0;if(keys.KeyW||keys.ArrowUp)target=8;else if(keys.KeyS||keys.ArrowDown)target=-3.5;
+  if(lunging){trex.lungeT-=dt;target=24;if(!trex.chomped&&doChomp())trex.chomped=true;}
+  trex.lungeCd=Math.max(0,trex.lungeCd-dt);trex.invuln=Math.max(0,trex.invuln-dt);
+  trex.speed+=(target-trex.speed)*Math.min(1,dt*(lunging?20:6));
+  const tr=lunging?1.2:2.3;if(keys.KeyA||keys.ArrowLeft)trex.heading+=tr*dt;if(keys.KeyD||keys.ArrowRight)trex.heading-=tr*dt;
+  trex.pos.addScaledVector(fwdOf(trex.heading),trex.speed*dt);
+  // stego bodies block
+  for(const e of entities){if(e.type!=='stego'||e.state==='eaten')continue;const d=dist2(trex.pos,e.g.position);if(d<3.6){const push=trex.pos.clone().sub(e.g.position);push.y=0;push.normalize();trex.pos.addScaledVector(push,3.6-d);}}
+  // stride + footprints
+  const sp=Math.abs(trex.speed);
+  trex.stride+=sp*dt;trex.walkPhase+=sp*dt*(Math.PI/2.4);
+  if(trex.stride>2.4){trex.stride=0;trex.side*=-1;sfx('thud');
+    const f=fwdOf(trex.heading),right=V3(f.z,0,-f.x);const p=trex.pos.clone().addScaledVector(right,trex.side*0.8).addScaledVector(f,0.4);
+    const b=biomeAt(p.x,p.z);if(b!=='forest')placeFootprint(p.x,p.z,trex.heading,b==='desert');}
+  // model
+  const m=trex.model;m.root.position.copy(trex.pos);m.root.rotation.y=trex.heading;
+  const moving=sp>0.5;const ph=trex.walkPhase;
+  m.root.position.y=moving?Math.abs(Math.sin(ph))*0.18:0;
+  m.legs[0].hip.rotation.x=moving?Math.sin(ph)*0.6:0;m.legs[1].hip.rotation.x=moving?-Math.sin(ph)*0.6:0;
+  m.legs[0].shin.rotation.x=moving?Math.max(0,-Math.sin(ph))*0.8:0.1;m.legs[1].shin.rotation.x=moving?Math.max(0,Math.sin(ph))*0.8:0.1;
+  const t=performance.now()/1000;const sway=Math.sin(t*2.2)*0.12+(keys.KeyA?0.2:0)-(keys.KeyD?0.2:0);
+  m.tails.forEach((tg,i)=>{tg.rotation.y=sway*(0.4+i*0.4);});
+  const jawTarget=lunging?0.95:(0.06+Math.sin(t*1.5)*0.03);trex.jawOpen+=(jawTarget-trex.jawOpen)*Math.min(1,dt*18);
+  m.jaw.rotation.x=trex.jawOpen;m.head.rotation.x=-trex.jawOpen*0.35+(lunging?0.15:0);
+  m.body.rotation.x=lunging?0.12:0;
+}
+function updateTrees(dt){
+  for(const c of chunks.values()){for(const tr of c.trees){if(tr.state!=='up')continue;
+    const d=dist2(trex.pos,tr.g.position);if(d<2.3){tr.state='falling';tr.t=0;
+      const dir=tr.g.position.clone().sub(trex.pos);dir.y=0;if(dir.lengthSq()<0.01)dir.set(1,0,0);dir.normalize();
+      tr.axis=V3(0,1,0).cross(dir).normalize();tr.g.rotation.set(0,tr.g.rotation.y,0);tr.baseQ=tr.g.quaternion.clone();
+      fallingTrees.push(tr);stats.trees++;addScore(0);sfx('tree');showMsg('Timber! Trees crushed: '+stats.trees,'#d8ffb0');}}}
+  for(let i=fallingTrees.length-1;i>=0;i--){const tr=fallingTrees[i];tr.t+=dt;const k=Math.min(1,tr.t/0.9);const ang=(Math.PI/2-0.08)*k*k;
+    const q=new THREE.Quaternion().setFromAxisAngle(tr.axis,ang);tr.g.quaternion.copy(q).multiply(tr.baseQ);
+    if(k>=1){tr.state='down';fallingTrees.splice(i,1);}}
+}
+function checkStomps(){
+  if(trex.lungeT>0||Math.abs(trex.speed)<2)return;
+  for(const e of entities){if(!e.alive||e.type==='stego')continue;if(dist2(e.g.position,trex.pos)<2.1)crush(e);}
+}
+
+// ============================================================ update: entities
+function animLegs(e,dt){e.phase+=e.speed*dt*3;const s=Math.sin(e.phase)*0.7;
+  if(e.type==='small'){e.legs[0].rotation.x=s;e.legs[1].rotation.x=-s;}
+  else if(e.type==='raptor'){e.legs[0].hip.rotation.x=s;e.legs[1].hip.rotation.x=-s;e.legs[0].shin.rotation.x=Math.max(0,-s)*0.8;e.legs[1].shin.rotation.x=Math.max(0,s)*0.8;}
+  if(e.speed>0.5)e.g.position.y=Math.abs(Math.sin(e.phase))*0.08;else e.g.position.y=0;}
+function moveEntity(e,dt,turnRate){e.heading=turnToward(e.heading,e.tHead,turnRate*dt);e.g.position.addScaledVector(fwdOf(e.heading),e.speed*dt);e.g.rotation.y=e.heading;}
+
+function updateSmall(e,dt){
+  const d=dist2(e.g.position,trex.pos);
+  e.wanderT-=dt;if(e.wanderT<=0){e.wanderT=rand(1,4);e.tHead=rand(-3.14,3.14);e.wanderSpeed=Math.random()<0.65?2.2:0;}
+  if(d<13){e.tHead=headingTo(trex.pos,e.g.position)+Math.sin(performance.now()/300+e.phase)*0.5;e.speed=6;}
+  else e.speed=e.wanderSpeed||0;
+  moveEntity(e,dt,d<13?6:3);animLegs(e,dt);
+}
+function updateStego(e,dt){
+  const d=dist2(e.g.position,trex.pos);
+  if(!e.alive)return;
+  e.st+=dt;
+  if(e.state==='windup'){e.speed=0;e.g.rotation.x=Math.sin(e.st*20)*0.03;e.tail.rotation.y=Math.sin(e.st*25)*0.25;e.tail.rotation.x=-0.35;
+    if(e.st<0.1)showWarn('⚠ Stegosaurus tail swing! Get out of range!');
+    if(e.st>=1.0){e.state='swing';e.st=0;}}
+  else if(e.state==='swing'){e.tail.rotation.y=Math.sin(e.st*14)*1.1;e.g.rotation.x=0;
+    if(e.st>0.15&&!e.swung){e.swung=true;
+      const toT=trex.pos.clone().sub(e.g.position);toT.y=0;const dd=toT.length();toT.normalize();const front=toT.dot(fwdOf(e.heading));
+      if(dd<7.5&&front<0.45)hurtTrex(1,'Stegosaurus tail');else showMsg('Dodged the tail swing!','#8cff8c');}
+    if(e.st>0.5){e.state='cool';e.st=0;e.swung=false;e.tail.rotation.set(0,0,0);e.loiter=0;}}
+  else{
+    if(e.state==='cool'&&e.st>1.2)e.state='idle';
+    e.wanderT-=dt;if(e.wanderT<=0){e.wanderT=rand(2,6);e.tHead=rand(-3.14,3.14);e.wanderSpeed=Math.random()<0.6?1.3:0;}
+    if(d<16){e.tHead=headingTo(trex.pos,e.g.position);e.speed=d<7?0:0.8;}else e.speed=e.wanderSpeed||0;
+    if(d<6.5){e.loiter+=dt;if(e.loiter>2.2&&e.state==='idle'){e.state='windup';e.st=0;}}else e.loiter=Math.max(0,e.loiter-dt);
+    moveEntity(e,dt,d<16?1.1:1.5);
+    e.phase+=e.speed*dt*3;e.tail.rotation.y=Math.sin(performance.now()/700)*0.15;
+  }
+}
+function updatePack(pack,dt){
+  const alive=pack.members.filter(m=>m.alive);
+  if(!alive.length)return;
+  let minD=1e9;for(const m of alive)minD=Math.min(minD,dist2(m.g.position,trex.pos));
+  if(!pack.hunting&&minD<42){pack.hunting=true;showWarn('Raptor pack is hunting you!');sfx('hurt');}
+  if(pack.hunting&&minD>80)pack.hunting=false;
+  pack.wanderT-=dt;if(pack.wanderT<=0){pack.wanderT=rand(3,7);pack.tHead=rand(-3.14,3.14);}
+  if(!pack.hunting){pack.anchor.addScaledVector(fwdOf(pack.tHead),1.5*dt);}
+  const n=alive.length,t=performance.now()/1000;
+  alive.forEach((e,i)=>{
+    e.cd-=dt;
+    if(!pack.hunting){
+      e.wanderT-=dt;if(e.wanderT<=0){e.wanderT=rand(1,3);const tgt=pack.anchor.clone().add(V3(rand(-6,6),0,rand(-6,6)));e.tHead=headingTo(e.g.position,tgt);e.wanderSpeed=Math.random()<0.7?2.5:0;}
+      e.speed=e.wanderSpeed||0;e.state='flank';moveEntity(e,dt,3);
+    }else{
+      // flank: side/rear arc around the T-rex, drifting
+      const a=trex.heading+Math.PI/2+((i+0.5)/n)*Math.PI+Math.sin(t*0.7+i*1.7)*0.35;
+      const fp=trex.pos.clone().add(V3(Math.sin(a)*6.5,0,Math.cos(a)*6.5));
+      const dT=dist2(e.g.position,trex.pos);
+      if(e.state==='flank'){const df=dist2(e.g.position,fp);e.tHead=headingTo(e.g.position,df<1.2?trex.pos:fp);e.speed=df<1.2?0:(df>14?11:8);moveEntity(e,dt,6);
+        if(df<2.5&&e.cd<=0){e.state='lunge';e.lungeT=0;}}
+      else if(e.state==='lunge'){e.lungeT+=dt;e.tHead=headingTo(e.g.position,trex.pos);e.speed=14;moveEntity(e,dt,8);
+        if(dT<2.6){hurtTrex(1,'Raptor');e.cd=rand(3.5,5);e.state='retreat';e.retreatT=0;}
+        else if(e.lungeT>1.6){e.state='retreat';e.retreatT=0;e.cd=1.5;}}
+      else{e.retreatT+=dt;const df=dist2(e.g.position,fp);e.tHead=headingTo(e.g.position,fp);e.speed=9;moveEntity(e,dt,7);if(df<1.5||e.retreatT>2)e.state='flank';}
+    }
+    animLegs(e,dt);
+  });
+}
+function updateEntities(dt){
+  for(const e of entities){
+    if(e.removeT!==undefined){e.removeT-=dt;continue;}
+    if(e.type==='small')updateSmall(e,dt);else if(e.type==='stego')updateStego(e,dt);
+  }
+  for(const p of packs)updatePack(p,dt);
+  // remove
+  for(let i=entities.length-1;i>=0;i--){const e=entities[i];
+    const far=dist2(e.g.position,trex.pos)>140&&!(e.type==='raptor'&&e.pack.hunting);
+    if((e.removeT!==undefined&&e.removeT<=0)||far){scene.remove(e.g);disposeGroup(e.g);entities.splice(i,1);
+      if(e.type==='raptor'){const k=e.pack.members.indexOf(e);if(k>=0)e.pack.members.splice(k,1);}}}
+  for(let i=packs.length-1;i>=0;i--)if(!packs[i].members.length)packs.splice(i,1);
+}
+let spawnT=0;
+function updateSpawns(dt){
+  spawnT-=dt;if(spawnT>0)return;spawnT=1.2;
+  const smalls=entities.filter(e=>e.type==='small'&&e.alive).length;
+  const stegos=entities.filter(e=>e.type==='stego'&&e.state!=='eaten').length;
+  const wantPacks=stats.score>=60?2:1;
+  if(smalls<12)spawnSmall(spawnPoint(35,80));
+  if(stegos<2)spawnStego(spawnPoint(50,90));
+  if(packs.length<wantPacks&&Math.random()<0.5)spawnPack(spawnPoint(60,95));
+}
+
+// ============================================================ camera / light
+const camPos=V3(0,8,-16);
+function updateCamera(dt){
+  const f=fwdOf(trex.heading);
+  const want=trex.pos.clone().addScaledVector(f,-15).add(V3(0,7.5,0));
+  camPos.lerp(want,Math.min(1,dt*3.5));camera.position.copy(camPos);
+  camera.lookAt(trex.pos.clone().addScaledVector(f,5).add(V3(0,2.5,0)));
+  sun.position.copy(trex.pos).add(V3(35,60,25));sun.target.position.copy(trex.pos);sun.target.updateMatrixWorld();
+}
+
+// ============================================================ game flow
+let started=false,gameOver=false;
+const clock=new THREE.Clock();
+function startGame(){
+  if(started)return;started=true;audioInit();$('overlay').style.display='none';renderHealth();renderStats();
+  for(let i=0;i<10;i++)spawnSmall(spawnPoint(15,60));
+  spawnStego(spawnPoint(40,70));spawnPack(spawnPoint(70,90));
+}
+function endGame(reason){
+  gameOver=true;
+  const k=stats.kills;
+  $('card').innerHTML=`<h1>${trex.health<=0?'STOMPED OUT':'GAME OVER'}</h1><p>${reason}</p><div style="font-size:28px;font-weight:bold;color:#ffd76a">Score ${stats.score}</div>
+  <table><tr><td>Trees crushed</td><td>${stats.trees}</td></tr><tr><td>Small animals crushed</td><td>${stats.smallCrushed}</td></tr><tr><td>Things eaten</td><td>${stats.eaten}</td></tr>
+  <tr><td>Small dinos killed</td><td>${k.small}</td></tr><tr><td>Raptors killed</td><td>${k.raptor}</td></tr><tr><td>Stegosaurus killed</td><td>${k.stego}</td></tr>
+  <tr><td>Damage dealt</td><td>${stats.dmgDone}</td></tr><tr><td>Damage taken</td><td>${stats.dmgTaken}</td></tr></table>
+  <button onclick="location.reload()">Play Again</button>`;
+  $('overlay').style.display='flex';
+}
+$('startBtn').addEventListener('click',startGame);
+
+let hudT=0;
+function update(dt){
+  updateTrex(dt);updateChunks(false);updateTrees(dt);checkStomps();updateFootprints(dt);updateEntities(dt);updateSpawns(dt);
+  if(msgT>0){msgT-=dt;if(msgT<=0)$('msg').style.opacity=0;}
+  if(warnT>0){warnT-=dt;$('warn').style.opacity=Math.min(1,warnT*3);}
+  hudT-=dt;if(hudT<=0){hudT=0.15;renderStats();}
+}
+trex.model=buildTrex();updateChunks(true);updateCamera(1);
+function animate(){
+  requestAnimationFrame(animate);
+  const dt=Math.min(clock.getDelta(),0.05);
+  if(started&&!gameOver)update(dt);
+  else{const t=performance.now()/1000;trex.model.jaw.rotation.x=0.06+Math.sin(t*1.5)*0.03;trex.model.tails.forEach((tg,i)=>tg.rotation.y=Math.sin(t*2.2)*0.12*(0.4+i*0.4));}
+  updateCamera(dt);
+  renderer.render(scene,camera);
+}
+animate();
+</script>
+</body>
+</html>
