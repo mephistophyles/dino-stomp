@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Dino Stomp</title>
 <style>
-  html,body{margin:0;height:100%;overflow:hidden;background:#9fd3f2;font-family:"Trebuchet MS",Verdana,sans-serif;color:#fff;}
+  html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:#9fd3f2;font-family:"Trebuchet MS",Verdana,sans-serif;color:#fff;}
   canvas{display:block;}
+  body.touch{touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
   #hud{position:fixed;inset:0;pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,.7);}
   #topleft{position:absolute;left:16px;top:14px;}
   #health{display:flex;gap:5px;margin-bottom:6px;}
@@ -19,7 +20,7 @@
   #warn{position:absolute;left:50%;top:100px;transform:translateX(-50%);font-size:20px;font-weight:bold;color:#ffcf3a;opacity:0;white-space:nowrap;}
   #help{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);font-size:13px;opacity:.85;white-space:nowrap;}
   #flash{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,rgba(255,0,0,0) 40%,rgba(200,0,0,.75) 100%);opacity:0;transition:opacity .1s;}
-  #overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,20,10,.72);}
+  #overlay{position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;background:rgba(10,20,10,.72);}
   #overlay .card{background:#1e2a18;border:3px solid #7fb04a;border-radius:14px;padding:28px 36px;max-width:520px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.6);}
   #overlay h1{margin:0 0 8px;font-size:44px;letter-spacing:2px;color:#b9e37a;}
   #overlay p{margin:8px 0;line-height:1.5;}
@@ -29,6 +30,33 @@
   #overlay td{padding:2px 10px;}
   #overlay td:last-child{text-align:right;color:#ffd76a;font-weight:bold;}
   kbd{background:#3b4a30;border:1px solid #7fb04a;border-radius:4px;padding:1px 6px;font-family:monospace;}
+
+  /* ---------- touch controls (shown only on touch devices) ---------- */
+  #touch{position:fixed;inset:0;pointer-events:none;display:none;z-index:5;touch-action:none;}
+  body.touch.playing #touch{display:block;}
+  body.touch #help{display:none;}
+  #stick{position:absolute;left:max(18px,env(safe-area-inset-left));bottom:max(24px,env(safe-area-inset-bottom));
+    width:148px;height:148px;border-radius:50%;pointer-events:auto;touch-action:none;
+    background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.22),rgba(0,0,0,.28));
+    border:2px solid rgba(255,255,255,.5);box-shadow:0 4px 18px rgba(0,0,0,.35);}
+  #stick .ring{position:absolute;inset:26px;border-radius:50%;border:1px dashed rgba(255,255,255,.28);}
+  #knob{position:absolute;left:50%;top:50%;width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;
+    background:radial-gradient(circle at 35% 30%,#cfe9a5,#7fb04a 70%);border:2px solid rgba(255,255,255,.8);
+    box-shadow:0 3px 10px rgba(0,0,0,.45);transition:transform .08s ease-out;}
+  #stick.active #knob{transition:none;}
+  #biteBtn{position:absolute;right:max(18px,env(safe-area-inset-right));bottom:max(34px,env(safe-area-inset-bottom));
+    width:122px;height:122px;border-radius:50%;pointer-events:auto;touch-action:none;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+    border:3px solid rgba(255,255,255,.75);background:radial-gradient(circle at 35% 28%,#ff8b6b,#c9352b 72%);
+    color:#fff;font:bold 17px/1 "Trebuchet MS",Verdana,sans-serif;letter-spacing:1px;
+    text-shadow:0 1px 3px rgba(0,0,0,.6);box-shadow:0 5px 18px rgba(0,0,0,.45);
+    -webkit-tap-highlight-color:transparent;user-select:none;}
+  #biteBtn .glyph{font-size:34px;line-height:1;}
+  #biteBtn.pressed{transform:scale(.92);filter:brightness(1.15);}
+  #biteBtn.cooling{opacity:.45;}
+  body.touch #stats{font-size:11px;min-width:0;padding:6px 9px;}
+  @media (max-height:430px){#stick{width:112px;height:112px}#knob{width:50px;height:50px;margin:-25px 0 0 -25px}
+    #stick .ring{inset:19px}#biteBtn{width:94px;height:94px;font-size:14px}#biteBtn .glyph{font-size:26px}}
 </style>
 </head>
 <body>
@@ -39,12 +67,17 @@
   <div id="warn"></div>
   <div id="help"><kbd>W</kbd>/<kbd>S</kbd> walk &nbsp; <kbd>A</kbd>/<kbd>D</kbd> turn &nbsp; <kbd>SPACE</kbd> lunge &amp; chomp &nbsp; <kbd>Q</kbd> quit</div>
 </div>
+<div id="touch">
+  <div id="stick"><div class="ring"></div><div id="knob"></div></div>
+  <div id="biteBtn"><span class="glyph">🦖</span><span>LUNGE</span></div>
+</div>
 <div id="flash"></div>
 <div id="overlay">
   <div class="card" id="card">
     <h1>DINO STOMP</h1>
     <p>You are a T-rex. Stomp through grassland, desert and forest. Knock over trees, crush little dinos, hunt for food.</p>
     <p><kbd>W</kbd>/<kbd>S</kbd> walk &nbsp; <kbd>A</kbd>/<kbd>D</kbd> turn &nbsp; <kbd>SPACE</kbd> lunge &amp; chomp &nbsp; <kbd>Q</kbd> quit</p>
+    <p id="touchHelp" style="display:none">Drag the green stick to walk and turn. Tap <b>LUNGE</b> to charge and chomp.</p>
     <p style="font-size:13px;opacity:.85">Small dinos: crush = 1 pt, eat = 5 pts + 1 health.<br>Stegosaurus: 3 bites to kill, then eat for 3 health. Dodge its tail!<br>Raptors hunt in packs and flank you. Stomp or bite them.</p>
     <button id="startBtn">Start Stomping</button>
   </div>
@@ -336,23 +369,79 @@ function doChomp(){
 
 // ============================================================ input
 const keys={};
+// analog axes: -1..1. Touch writes them; the keyboard is read as full deflection.
+const touchAxis={move:0,turn:0};
+function moveAxis(){if(keys.KeyW||keys.ArrowUp)return 1;if(keys.KeyS||keys.ArrowDown)return -1;return touchAxis.move;}
+function turnAxis(){if(keys.KeyA||keys.ArrowLeft)return 1;if(keys.KeyD||keys.ArrowRight)return -1;return touchAxis.turn;}
+function tryLunge(){
+  if(!started||gameOver||trex.lungeT>0||trex.lungeCd>0)return false;
+  trex.lungeT=0.38;trex.lungeCd=0.75;trex.chomped=false;sfx('chomp');return true;
+}
 addEventListener('keydown',e=>{
   if(e.code==='Space')e.preventDefault();
   if(!started){if(e.code==='Space'||e.code==='Enter')startGame();return;}
   keys[e.code]=true;
-  if(e.code==='Space'&&!gameOver&&trex.lungeT<=0&&trex.lungeCd<=0){trex.lungeT=0.38;trex.lungeCd=0.75;trex.chomped=false;sfx('chomp');}
+  if(e.code==='Space')tryLunge();
   if((e.code==='KeyQ'||e.code==='Escape')&&!gameOver)endGame('You quit. The T-rex retires to a quiet swamp.');
 });
 addEventListener('keyup',e=>{keys[e.code]=false;});
 
+// ------------------------------------------------------------ touch controls
+(function touchControls(){
+  // ?touch forces the pad on, handy for previewing on a desktop
+  const isTouch=/[?&]touch/.test(location.search)||matchMedia('(pointer:coarse)').matches||'ontouchstart' in window||navigator.maxTouchPoints>0;
+  if(!isTouch)return;
+  document.body.classList.add('touch');
+  $('touchHelp').style.display='';
+
+  const stick=$('stick'),knob=$('knob'),bite=$('biteBtn');
+  const DEAD=0.16; // fraction of radius ignored, so a resting thumb does not creep
+  let stickId=null,radius=1;
+
+  function setKnob(dx,dy){knob.style.transform=`translate(${dx}px,${dy}px)`;}
+  function release(){stickId=null;touchAxis.move=0;touchAxis.turn=0;stick.classList.remove('active');setKnob(0,0);}
+  function track(e){
+    const r=stick.getBoundingClientRect();
+    radius=r.width/2-14;
+    let dx=e.clientX-(r.left+r.width/2),dy=e.clientY-(r.top+r.height/2);
+    const len=Math.hypot(dx,dy);
+    if(len>radius){dx*=radius/len;dy*=radius/len;}
+    setKnob(dx,dy);
+    const nx=dx/radius,ny=dy/radius;
+    const shape=v=>{const a=Math.abs(v);return a<DEAD?0:Math.sign(v)*(a-DEAD)/(1-DEAD);};
+    touchAxis.turn=-shape(nx);  // drag right -> turn right (heading decreases)
+    touchAxis.move=-shape(ny);  // drag up -> walk forward
+  }
+  stick.addEventListener('pointerdown',e=>{
+    if(stickId!==null)return;
+    stickId=e.pointerId;stick.setPointerCapture(e.pointerId);stick.classList.add('active');
+    e.preventDefault();track(e);
+  });
+  stick.addEventListener('pointermove',e=>{if(e.pointerId===stickId){e.preventDefault();track(e);}});
+  for(const ev of ['pointerup','pointercancel','lostpointercapture'])
+    stick.addEventListener(ev,e=>{if(e.pointerId===stickId)release();});
+
+  bite.addEventListener('pointerdown',e=>{
+    e.preventDefault();
+    if(!started){startGame();return;}
+    tryLunge();bite.classList.add('pressed');
+  });
+  for(const ev of ['pointerup','pointercancel','pointerleave'])
+    bite.addEventListener(ev,()=>bite.classList.remove('pressed'));
+  bite.addEventListener('contextmenu',e=>e.preventDefault());
+
+  // dim the button while the lunge is on cooldown
+  setInterval(()=>{bite.classList.toggle('cooling',started&&(trex.lungeT>0||trex.lungeCd>0));},60);
+})();
+
 // ============================================================ update: trex
 function updateTrex(dt){
   const lunging=trex.lungeT>0;
-  let target=0;if(keys.KeyW||keys.ArrowUp)target=8;else if(keys.KeyS||keys.ArrowDown)target=-3.5;
+  const mv=moveAxis();let target=mv>0?8*mv:3.5*mv;
   if(lunging){trex.lungeT-=dt;target=24;if(!trex.chomped&&doChomp())trex.chomped=true;}
   trex.lungeCd=Math.max(0,trex.lungeCd-dt);trex.invuln=Math.max(0,trex.invuln-dt);
   trex.speed+=(target-trex.speed)*Math.min(1,dt*(lunging?20:6));
-  const tr=lunging?1.2:2.3;if(keys.KeyA||keys.ArrowLeft)trex.heading+=tr*dt;if(keys.KeyD||keys.ArrowRight)trex.heading-=tr*dt;
+  const tn=turnAxis();const tr=lunging?1.2:2.3;trex.heading+=tr*tn*dt;
   trex.pos.addScaledVector(fwdOf(trex.heading),trex.speed*dt);
   // stego bodies block
   for(const e of entities){if(e.type!=='stego'||e.state==='eaten')continue;const d=dist2(trex.pos,e.g.position);if(d<3.6){const push=trex.pos.clone().sub(e.g.position);push.y=0;push.normalize();trex.pos.addScaledVector(push,3.6-d);}}
@@ -368,7 +457,7 @@ function updateTrex(dt){
   m.root.position.y=moving?Math.abs(Math.sin(ph))*0.18:0;
   m.legs[0].hip.rotation.x=moving?Math.sin(ph)*0.6:0;m.legs[1].hip.rotation.x=moving?-Math.sin(ph)*0.6:0;
   m.legs[0].shin.rotation.x=moving?Math.max(0,-Math.sin(ph))*0.8:0.1;m.legs[1].shin.rotation.x=moving?Math.max(0,Math.sin(ph))*0.8:0.1;
-  const t=performance.now()/1000;const sway=Math.sin(t*2.2)*0.12+(keys.KeyA?0.2:0)-(keys.KeyD?0.2:0);
+  const t=performance.now()/1000;const sway=Math.sin(t*2.2)*0.12+tn*0.2;
   m.tails.forEach((tg,i)=>{tg.rotation.y=sway*(0.4+i*0.4);});
   const jawTarget=lunging?0.95:(0.06+Math.sin(t*1.5)*0.03);trex.jawOpen+=(jawTarget-trex.jawOpen)*Math.min(1,dt*18);
   m.jaw.rotation.x=trex.jawOpen;m.head.rotation.x=-trex.jawOpen*0.35+(lunging?0.15:0);
@@ -491,12 +580,12 @@ function updateCamera(dt){
 let started=false,gameOver=false;
 const clock=new THREE.Clock();
 function startGame(){
-  if(started)return;started=true;audioInit();$('overlay').style.display='none';renderHealth();renderStats();
+  if(started)return;started=true;document.body.classList.add('playing');audioInit();$('overlay').style.display='none';renderHealth();renderStats();
   for(let i=0;i<10;i++)spawnSmall(spawnPoint(15,60));
   spawnStego(spawnPoint(40,70));spawnPack(spawnPoint(70,90));
 }
 function endGame(reason){
-  gameOver=true;
+  gameOver=true;document.body.classList.remove('playing');
   const k=stats.kills;
   $('card').innerHTML=`<h1>${trex.health<=0?'STOMPED OUT':'GAME OVER'}</h1><p>${reason}</p><div style="font-size:28px;font-weight:bold;color:#ffd76a">Score ${stats.score}</div>
   <table><tr><td>Trees crushed</td><td>${stats.trees}</td></tr><tr><td>Small animals crushed</td><td>${stats.smallCrushed}</td></tr><tr><td>Things eaten</td><td>${stats.eaten}</td></tr>
